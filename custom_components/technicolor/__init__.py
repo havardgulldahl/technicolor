@@ -1,6 +1,8 @@
 """The technicolor integration."""
+
 from datetime import timedelta
 
+from .errors import CannotLoginException
 from .const import DOMAIN
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -43,9 +45,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         hass.config_entries.async_update_entry(entry, options=yaml_options)
 
     technicolor_router = TechnicolorRouter(hass, entry)
+    if technicolor_router is None:
+        raise CannotLoginException("Unable to login to the router")
     await technicolor_router.setup()
 
-    hass.async_create_task(hass.config_entries.async_forward_entry_setup(entry, "device_tracker"))
+    hass.async_create_task(
+        hass.config_entries.async_forward_entry_setup(entry, "device_tracker")
+    )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         DOMAIN: technicolor_router,
