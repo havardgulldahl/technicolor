@@ -1,12 +1,11 @@
 """Support for Technicolor routers."""
-import logging
-from typing import Dict, Any
 
-import voluptuous as vol
+import logging
+from typing import Any, Dict
 
 import homeassistant.helpers.config_validation as cv
+import voluptuous as vol
 from homeassistant.components.device_tracker.config_entry import ScannerEntity
-from .router import TechnicolorRouter
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_DEVICES,
@@ -16,11 +15,20 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 from homeassistant.core import HomeAssistant, callback
-from .const import DOMAIN
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from technicolorgateway.datamodels import (
+    DiagnosticsConnection,
+    NetworkDevice,
+    SystemInfo,
+)
+
+from .const import DOMAIN
+from .router import TechnicolorRouter
 
 DEFAULT_DEVICE_NAME = "Unknown device"
 SOURCE_TYPE_ROUTER = "router"
+ATTR_LAST_TIME_REACHABLE = "last_time_reachable"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,8 +39,12 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Required(CONF_HOST): cv.string,
                 vol.Required(CONF_USERNAME): cv.string,
                 vol.Required(CONF_PASSWORD): cv.string,
-                vol.Optional(CONF_DEVICES, default=[]): vol.All(cv.ensure_list, [cv.string]),
-                vol.Optional(CONF_EXCLUDE, default=[]): vol.All(cv.ensure_list, [cv.string]),
+                vol.Optional(CONF_DEVICES, default=[]): vol.All(
+                    cv.ensure_list, [cv.string]
+                ),
+                vol.Optional(CONF_EXCLUDE, default=[]): vol.All(
+                    cv.ensure_list, [cv.string]
+                ),
             }
         ),
     },
@@ -41,7 +53,7 @@ CONFIG_SCHEMA = vol.Schema(
 
 
 async def async_setup_entry(
-        hass: HomeAssistant, entry: ConfigEntry, async_add_entities
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities
 ) -> None:
     """Set up device tracker for Technicolor component."""
     router = hass.data[DOMAIN][entry.entry_id][DOMAIN]
@@ -61,7 +73,11 @@ async def async_setup_entry(
 
 
 @callback
-def add_entities(router, async_add_entities, tracked):
+def add_entities(
+    router: TechnicolorRouter,
+    async_add_entities: AddEntitiesCallback,
+    tracked: set[str],
+):
     """Add new tracker entities from the gateway."""
     _LOGGER.info(f"add_entities tracked ${tracked}")
     new_tracked = []
@@ -81,30 +97,31 @@ def add_entities(router, async_add_entities, tracked):
 class TechnicolorDeviceScanner(ScannerEntity):
     """Representation of a Technicolor device."""
 
-    def __init__(self, router: TechnicolorRouter, device) -> None:
+    def __init__(self, router: TechnicolorRouter, device: NetworkDevice) -> None:
         """Initialize a Technicolor device."""
         self._router = router
         self._device = device
-        self._mac = device["mac"]
+        self._mac = str(device.mac_address)
         self._active = False
+        self._attr_name = device.friendly_name or DEFAULT_DEVICE_NAME
 
     @callback
     def async_update_state(self) -> None:
         """Update the Technicolor device."""
         device = self._router.devices[self._mac]
-        self._device['ip'] = device['ip']
+        self._device["ip"] = device["ip"]
         _LOGGER.info(f"updating state for ${self._mac} with ip ${self._device['ip']}")
-        self._active = self._device['ip'] is not None and self._device['ip'] != ""
+        self._active = self._device["ip"] is not None and self._device["ip"] != ""
 
     @property
     def unique_id(self) -> str:
         """Return a unique ID."""
-        return self._device['mac']
+        return str(self._device.mac_address)
 
     @property
     def name(self) -> str:
         """Return the name."""
-        return self._device['name'] or DEFAULT_DEVICE_NAME
+        return self._attr_name
 
     @property
     def is_connected(self):
@@ -124,17 +141,17 @@ class TechnicolorDeviceScanner(ScannerEntity):
     @property
     def hostname(self) -> str:
         """Return the hostname of device."""
-        return self._device['name']
+        return self._device.host_name
 
     @property
     def ip_address(self) -> str:
         """Return the primary ip address of the device."""
-        return self._device['ip']
+        return str(self._device.ipv4)
 
     @property
     def mac_address(self) -> str:
         """Return the mac address of the device."""
-        return self._device['mac']
+        return str(self._device.mac_address)
 
     @property
     def device_info(self) -> Dict[str, Any]:
