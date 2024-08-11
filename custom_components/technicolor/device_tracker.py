@@ -1,11 +1,17 @@
 """Support for Technicolor routers."""
 
+import ipaddress
 import logging
+from dataclasses import asdict
 from typing import Any, Dict
 
 import homeassistant.helpers.config_validation as cv
+import macaddress
 import voluptuous as vol
-from homeassistant.components.device_tracker.config_entry import ScannerEntity
+from homeassistant.components.device_tracker.config_entry import (
+    ScannerEntity,
+    SourceType,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_DEVICES,
@@ -15,6 +21,7 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo, format_mac
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from technicolorgateway.datamodels import (
@@ -23,11 +30,10 @@ from technicolorgateway.datamodels import (
     SystemInfo,
 )
 
-from .const import DOMAIN
-from .router import TechnicolorRouter
+from .const import DEVICE_ICONS, DOMAIN
+from .router import ConnectedDevice, TechnicolorRouter
 
 DEFAULT_DEVICE_NAME = "Unknown device"
-SOURCE_TYPE_ROUTER = "router"
 ATTR_LAST_TIME_REACHABLE = "last_time_reachable"
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,7 +92,16 @@ def add_entities(
         if mac in tracked:
             continue
 
-        new_tracked.append(TechnicolorDeviceScanner(router, device))
+        new_tracked.append(
+            TechnicolorDeviceScanner(
+                router,
+                (
+                    asdict(ConnectedDevice.from_network_device(device))
+                    if isinstance(device, NetworkDevice)
+                    else device
+                ),
+            )
+        )
         tracked.add(mac)
         _LOGGER.info(f"add_entities {mac}")
 
@@ -97,26 +112,32 @@ def add_entities(
 class TechnicolorDeviceScanner(ScannerEntity):
     """Representation of a Technicolor device."""
 
-    def __init__(self, router: TechnicolorRouter, device: NetworkDevice) -> None:
+    def __init__(self, router: TechnicolorRouter, device: dict) -> None:
         """Initialize a Technicolor device."""
-        self._router = router
+        self._router: TechnicolorRouter = router
+        self._mac: str = device["mac"]
         self._device = device
-        self._mac = str(device.mac_address)
-        self._active = False
-        self._attr_name = device.friendly_name or DEFAULT_DEVICE_NAME
+        self._attr_name: str = device["name"] or DEFAULT_DEVICE_NAME
+        self._icon: str = (
+            "mdi:help-network"  # DEVICE_ICONS.get(self._device["device_type"], "mdi:help-network")
+        )
+        _LOGGER.warn("Got device %s", self._device)
+        self._active = device["ip"] is not None
+        self._ipv4 = device["ip"]
 
     @callback
     def async_update_state(self) -> None:
         """Update the Technicolor device."""
-        device = self._router.devices[self._mac]
-        self._device["ip"] = device["ip"]
-        _LOGGER.info(f"updating state for ${self._mac} with ip ${self._device['ip']}")
-        self._active = self._device["ip"] is not None and self._device["ip"] != ""
+        device = self._router.devices[self.mac_address]
+        self._ipv4 = device["ip"]
+        self._icon = DEVICE_ICONS.get(self._device["device_type"], "mdi:help-network")
+        _LOGGER.info(f"updating state for {self._mac} with ip {self._ipv4}")
+        # self._active = self._device["ip"] is not None and self._device["ip"] != ""
 
     @property
     def unique_id(self) -> str:
         """Return a unique ID."""
-        return str(self._device.mac_address)
+        return self.mac_address
 
     @property
     def name(self) -> str:
@@ -131,7 +152,7 @@ class TechnicolorDeviceScanner(ScannerEntity):
     @property
     def source_type(self) -> str:
         """Return the source type."""
-        return SOURCE_TYPE_ROUTER
+        return SourceType.ROUTER
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
@@ -141,22 +162,27 @@ class TechnicolorDeviceScanner(ScannerEntity):
     @property
     def hostname(self) -> str:
         """Return the hostname of device."""
-        return self._device.host_name
+        return self.name
 
     @property
     def ip_address(self) -> str:
         """Return the primary ip address of the device."""
-        return str(self._device.ipv4)
+        return str(self._ipv4)
 
     @property
     def mac_address(self) -> str:
         """Return the mac address of the device."""
-        return str(self._device.mac_address)
+        return format_mac(str(self._mac))
 
     @property
     def device_info(self) -> Dict[str, Any]:
         """Return the device information."""
         return {}
+
+    @property
+    def icon(self) -> str:
+        """Return the icon."""
+        return self._icon
 
     @property
     def should_poll(self) -> bool:

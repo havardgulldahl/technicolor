@@ -16,6 +16,7 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo, format_mac
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
@@ -23,6 +24,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.util import slugify
 from technicolorgateway import TechnicolorGateway
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta
 from technicolorgateway.datamodels import (
     DiagnosticsConnection,
     NetworkDevice,
@@ -31,23 +34,20 @@ from technicolorgateway.datamodels import (
 
 from .const import (
     CONF_CONSIDER_HOME,
-    CONF_DNSMASQ,
-    CONF_INTERFACE,
     CONF_REQUIRE_IP,
     CONF_TRACK_UNKNOWN,
     DEFAULT_CONSIDER_HOME,
-    DEFAULT_INTERFACE,
     DEFAULT_NAME,
     DEFAULT_TRACK_UNKNOWN,
     DOMAIN,
-    KEY_COORDINATOR,
-    KEY_METHOD,
-    KEY_SENSORS,
+    MODE_GUEST,
     MODE_AP,
     MODE_ROUTER,
+    MODE_WLAN,
+    MODE_ETHERNET,
 )
 
-CONF_REQ_RELOAD = [CONF_DNSMASQ, CONF_INTERFACE, CONF_REQUIRE_IP]
+CONF_REQ_RELOAD = [CONF_REQUIRE_IP]
 
 # from .device_tracker import TechnicolorDeviceScanner
 TechnicolorDeviceScanner = Any
@@ -57,7 +57,56 @@ _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(seconds=30)
 SENSORS_TYPE_COUNT = "sensors_count"
 
-ConnectedDevice = namedtuple("WrtDevice", ["ip", "name", "connected_to"])
+
+@dataclass
+class ConnectedDevice:
+    mac: str
+    name: str
+    active: bool = False
+    last_seen: datetime = dt_util.utcnow() - timedelta(days=365)
+    device_model: str = None
+    device_type: str = None
+    type: str = None
+    link_rate: str = None
+    signal: str = None
+    ip: str = None
+    ssid: str = None
+    conn_ap_mac: str = None
+    allow_or_block: str = None
+
+    @staticmethod
+    def from_network_device(device: NetworkDevice) -> "ConnectedDevice":
+
+        dt = None
+        if device.is_satellite:
+            dt = MODE_AP
+        elif device.is_guest:
+            dt = MODE_GUEST
+        elif device.is_ethernet:
+            dt = MODE_ETHERNET
+        else:
+            dt = MODE_WLAN
+
+        try:
+            rate = float(device.speed)
+        except (TypeError, ValueError):
+            rate = None
+
+        return ConnectedDevice(
+            mac=format_mac(str(device.mac_address)),
+            name=device.friendly_name,
+            active=True,
+            last_seen=dt_util.utcnow(),
+            # device_model=device.device_model,
+            device_type=dt,
+            type=device.device_type,
+            link_rate=rate,
+            # signal=device.signal,
+            ip=device.ipv4,
+            ssid=device.ssid,
+            # conn_ap_mac=device.conn_ap_mac,
+            # allow_or_block=device.allow_or_block,
+        )
 
 
 class TechnicolorRouter:
@@ -85,22 +134,24 @@ class TechnicolorRouter:
         self.listeners = []
         self.track_devices = True
 
-        self._connected_devices = 0
-        self._devices: dict[str, TechnicolorDeviceScanner] = {}
+        self._devices: dict[str, Any] = {}
         self._connected_devices: int = 0
         self._connect_error: bool = False
+        consider_home_int = entry.options.get(
+            CONF_CONSIDER_HOME, DEFAULT_CONSIDER_HOME.total_seconds()
+        )
+        self._consider_home = timedelta(seconds=consider_home_int)
 
     async def setup(self) -> None:
-        self._api = TechnicolorGateway(self._host, "80", self._user, self._pass)
+        self._api: TechnicolorGateway = TechnicolorGateway(
+            self._host, "80", self._user, self._pass
+        )
 
         try:
             await self.hass.async_add_executor_job(self._api.authenticate)
         except Exception as e:
             _LOGGER.exception("Failed to connect to Technicolor", e)
             raise ConfigEntryNotReady from e
-
-        _LOGGER.warn(f"{self._api}")
-        _LOGGER.warn(f"{self._api._br}")
 
         # get static system info (device name, model, firmware, ...)
         self._info = await self.hass.async_add_executor_job(
@@ -127,6 +178,7 @@ class TechnicolorRouter:
                 continue
             device_mac = format_mac(entry.unique_id)
 
+            _LOGGER.warn(f"{entry.entity_id} {entry} {device_mac}")
             # migrate entity unique ID if wrong formatted
             if device_mac != entry.unique_id:
                 existing_entity_id = entity_reg.async_get_entity_id(
@@ -142,8 +194,8 @@ class TechnicolorRouter:
                     entry.entity_id, new_unique_id=device_mac
                 )
 
-            self._devices[device_mac] = TechnicolorDeviceScanner(
-                device_mac, entry.original_name
+            self._devices[device_mac] = asdict(
+                ConnectedDevice(mac=device_mac, name=entry.name)
             )
 
         # Update devices
@@ -152,29 +204,30 @@ class TechnicolorRouter:
         self.async_on_close(
             async_track_time_interval(self.hass, self.update_all, SCAN_INTERVAL)
         )
+        return True
 
-    async def update_all(self, now) -> None:
+    async def update_all(self, now=None) -> None:
         """Update all Technicolor platforms."""
-        _LOGGER.info("update_all")
-        await self.update_device_trackers()
-
-    async def update_device_trackers(self) -> None:
         _LOGGER.info("update_device_trackers")
         new_device = None
-        # devices = await self.hass.async_add_executor_job(self._api.get_device_modal)
+        now = dt_util.utcnow()
         devices = await self.hass.async_add_executor_job(
             self._api.get_network_device_details
         )
 
         for device in devices:
-            _LOGGER.warn(f"update_device_trackers device {device}")
-            device_mac = str(device.mac_address)
-            _LOGGER.info(f"device: {device_mac}")
-            if self.devices.get(device_mac) is None:
+            cd = asdict(ConnectedDevice.from_network_device(device))
+            if self.devices.get(cd["mac"]) is None:
                 new_device = True
-                _LOGGER.info("new")
+                _LOGGER.info("new: %s", cd["mac"])
+                last_time = now
+            else:
+                new_device = False
+                last_time: datetime = self.devices[cd["mac"]]["last_seen"]
 
-            self.devices[device_mac] = device
+            cd["active"] = now - last_time < self._consider_home
+            cd["last_seen"] = now
+            self._devices[cd["mac"]] = cd
 
         async_dispatcher_send(self.hass, self.signal_device_update)
 
@@ -184,7 +237,7 @@ class TechnicolorRouter:
     async def close(self) -> None:
         """Close the connection."""
         if self._api is not None:
-            await self._api.async_disconnect()
+            await self._api.logout()
 
         for func in self._on_close:
             func()
@@ -207,6 +260,48 @@ class TechnicolorRouter:
 
         self._options.update(new_options)
         return req_reload
+
+    async def async_get_traffic_meter(self) -> dict[str, Any] | None:
+        """Get the traffic meter data of the router."""
+        raise NotImplementedError
+        async with self.api_lock:
+            return await self.hass.async_add_executor_job(self.api.get_traffic_meter)
+
+    async def async_get_speed_test(self) -> dict[str, Any] | None:
+        """Perform a speed test and get the results from the router."""
+        raise NotImplementedError
+        async with self.api_lock:
+            return await self.hass.async_add_executor_job(
+                self.api.get_new_speed_test_result
+            )
+
+    async def async_get_link_status(self) -> dict[str, Any] | None:
+        """Check the ethernet link status of the router."""
+        async with self.api_lock:
+            return await self.hass.async_add_executor_job(
+                self._api.get_diagnostics_connection_modal
+            )
+
+    async def async_allow_block_device(self, mac: str, allow_block: str) -> None:
+        """Allow or block a device connected to the router."""
+        raise NotImplementedError
+        async with self.api_lock:
+            await self.hass.async_add_executor_job(
+                self.api.allow_block_device, mac, allow_block
+            )
+
+    async def async_get_utilization(self) -> dict[str, Any] | None:
+        """Get the system information about utilization of the router."""
+        async with self.api_lock:
+            return await self.hass.async_add_executor_job(
+                self._api.get_system_info_modal
+            )
+
+    async def async_reboot(self) -> None:
+        """Reboot the router."""
+        raise NotImplementedError
+        async with self.api_lock:
+            await self.hass.async_add_executor_job(self.api.reboot)
 
     @property
     def signal_device_update(self) -> str:
