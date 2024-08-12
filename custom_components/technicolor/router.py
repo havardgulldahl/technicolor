@@ -237,11 +237,8 @@ class TechnicolorRouter:
     async def close(self) -> None:
         """Close the connection."""
         if self._api is not None:
-            await self._api.logout()
-
-        for func in self._on_close:
-            func()
-        self._on_close.clear()
+            async with self.api_lock:
+                await self.hass.async_add_executor_job(self._api.logout)
 
     @callback
     def async_on_close(self, func: CALLBACK_TYPE) -> None:
@@ -314,11 +311,6 @@ class TechnicolorRouter:
         return f"{DOMAIN}-device-new"
 
     @property
-    def host(self) -> str:
-        """Return router hostname."""
-        return self._api.host
-
-    @property
     def unique_id(self) -> str:
         """Return router unique id."""
         return self._entry.unique_id or self._entry.entry_id
@@ -327,8 +319,3 @@ class TechnicolorRouter:
     def devices(self) -> dict[str, TechnicolorDeviceScanner]:
         """Return devices."""
         return self._devices
-
-    @property
-    def sensors_coordinator(self) -> dict[str, Any]:
-        """Return sensors coordinators."""
-        return self._sensors_coordinator

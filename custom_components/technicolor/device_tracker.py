@@ -118,10 +118,7 @@ class TechnicolorDeviceScanner(ScannerEntity):
         self._mac: str = device["mac"]
         self._device = device
         self._attr_name: str = device["name"] or DEFAULT_DEVICE_NAME
-        self._icon: str = (
-            "mdi:help-network"  # DEVICE_ICONS.get(self._device["device_type"], "mdi:help-network")
-        )
-        _LOGGER.warn("Got device %s", self._device)
+        self._icon: str = "mdi:help-network"
         self._active = device["ip"] is not None
         self._ipv4 = device["ip"]
 
@@ -129,10 +126,11 @@ class TechnicolorDeviceScanner(ScannerEntity):
     def async_update_state(self) -> None:
         """Update the Technicolor device."""
         device = self._router.devices[self.mac_address]
+        self._device = device
         self._ipv4 = device["ip"]
         self._icon = DEVICE_ICONS.get(self._device["device_type"], "mdi:help-network")
         _LOGGER.info(f"updating state for {self._mac} with ip {self._ipv4}")
-        # self._active = self._device["ip"] is not None and self._device["ip"] != ""
+        self._active = device["ip"] is not None
 
     @property
     def unique_id(self) -> str:
